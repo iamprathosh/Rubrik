@@ -7,11 +7,30 @@ from awsglue.job import Job
 from awsgluedq.transforms import EvaluateDataQuality
 from awsglue import DynamicFrame
 
-def sparkSqlQuery(glueContext, query, mapping, transformation_ctx) -> DynamicFrame:
-    for alias, frame in mapping.items():
-        frame.toDF().createOrReplaceTempView(alias)
-    result = spark.sql(query)
-    return DynamicFrame.fromDF(result, glueContext, transformation_ctx)
+def query_dynamic_frames(glue_context, sql_query, view_map, context_id):
+    """
+    Run SQL queries on dynamic frames by creating temporary views.
+    
+    Args:
+        glue_context: The GlueContext to use
+        sql_query: SQL query string to execute
+        view_map: Dictionary mapping view names to DynamicFrames
+        context_id: Transformation context identifier
+        
+    Returns:
+        A new DynamicFrame with the query results
+    """
+    # Create temporary views for each dynamic frame
+    for view_name, frame in view_map.items():
+        frame.toDF().createOrReplaceTempView(view_name)
+        
+    # Execute SQL query
+    query_output = spark.sql(sql_query)
+    
+    # Convert back to DynamicFrame
+    return DynamicFrame.fromDF(query_output, glue_context, context_id)
+
+# Initialize the Glue job environment
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -19,32 +38,72 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# Default ruleset used by all target nodes with data quality enabled
-DEFAULT_DATA_QUALITY_RULESET = """
+# Define data quality check rules
+DATA_QUALITY_RULES = """
     Rules = [
         ColumnCount > 0
     ]
 """
 
-# Script generated for node Step_trainer_landing
-Step_trainer_landing_node1745302629180 = glueContext.create_dynamic_frame.from_catalog(database="stedi_db", table_name="step_trainer_landing", transformation_ctx="Step_trainer_landing_node1745302629180")
+# Load step trainer readings from landing zone
+step_trainer_landing = glueContext.create_dynamic_frame.from_catalog(
+    database="stedi_db", 
+    table_name="step_trainer_landing", 
+    transformation_ctx="step_trainer_landing_source"
+)
 
-# Script generated for node customer_curated
-customer_curated_node1745302646044 = glueContext.create_dynamic_frame.from_catalog(database="stedi_db", table_name="customer_curated", transformation_ctx="customer_curated_node1745302646044")
+# Load curated customer data (customers who have consented and have accelerometer data)
+customer_curated = glueContext.create_dynamic_frame.from_catalog(
+    database="stedi_db", 
+    table_name="customer_curated", 
+    transformation_ctx="customer_curated_source"
+)
 
-# Script generated for node SQL Query
-SqlQuery657 = '''
-select Step_trainer.* from Step_trainer 
-inner join Customer_curated
-on Step_Trainer.serialnumber = Customer_curated.serialnumber;
+# Filter step trainer readings to include only those from customers in the curated zone
+# This ensures we only process data for customers who have consented to research
+step_trainer_filter_query = """
+SELECT trainer_data.* 
+FROM trainer_data
+INNER JOIN customer_data
+ON trainer_data.serialnumber = customer_data.serialnumber
+"""
 
-'''
-SQLQuery_node1745304303505 = sparkSqlQuery(glueContext, query = SqlQuery657, mapping = {"Step_trainer":Step_trainer_landing_node1745302629180, "Customer_curated":customer_curated_node1745302646044}, transformation_ctx = "SQLQuery_node1745304303505")
+step_trainer_trusted = query_dynamic_frames(
+    glueContext,
+    step_trainer_filter_query,
+    {"trainer_data": step_trainer_landing, "customer_data": customer_curated},
+    "filter_step_trainer_to_trusted"
+)
 
-# Script generated for node Amazon S3
-EvaluateDataQuality().process_rows(frame=SQLQuery_node1745304303505, ruleset=DEFAULT_DATA_QUALITY_RULESET, publishing_options={"dataQualityEvaluationContext": "EvaluateDataQuality_node1745302609004", "enableDataQualityResultsPublishing": True}, additional_options={"dataQualityResultsPublishing.strategy": "BEST_EFFORT", "observations.scope": "ALL"})
-AmazonS3_node1745304953092 = glueContext.getSink(path="s3://stedi-human-sr/step_trainer/trusted/", connection_type="s3", updateBehavior="UPDATE_IN_DATABASE", partitionKeys=[], enableUpdateCatalog=True, transformation_ctx="AmazonS3_node1745304953092")
-AmazonS3_node1745304953092.setCatalogInfo(catalogDatabase="stedi_db",catalogTableName="step_trainer_trusted")
-AmazonS3_node1745304953092.setFormat("json")
-AmazonS3_node1745304953092.writeFrame(SQLQuery_node1745304303505)
+# Validate data quality before saving
+EvaluateDataQuality().process_rows(
+    frame=step_trainer_trusted, 
+    ruleset=DATA_QUALITY_RULES, 
+    publishing_options={
+        "dataQualityEvaluationContext": "step_trainer_trusted_quality_check", 
+        "enableDataQualityResultsPublishing": True
+    }, 
+    additional_options={
+        "dataQualityResultsPublishing.strategy": "BEST_EFFORT", 
+        "observations.scope": "ALL"
+    }
+)
+
+# Write trusted step trainer data to S3
+trusted_step_trainer_sink = glueContext.getSink(
+    path="s3://stedi-human-sr/step_trainer/trusted/", 
+    connection_type="s3", 
+    updateBehavior="UPDATE_IN_DATABASE", 
+    partitionKeys=[], 
+    enableUpdateCatalog=True, 
+    transformation_ctx="write_step_trainer_trusted"
+)
+
+trusted_step_trainer_sink.setCatalogInfo(
+    catalogDatabase="stedi_db",
+    catalogTableName="step_trainer_trusted"
+)
+trusted_step_trainer_sink.setFormat("json")
+trusted_step_trainer_sink.writeFrame(step_trainer_trusted)
+
 job.commit()
