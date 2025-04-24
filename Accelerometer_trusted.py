@@ -42,9 +42,10 @@ QUALITY_RULESET = """
 """
 
 # Load raw accelerometer data from landing zone
-accelerometer_landing = glueContext.create_dynamic_frame.from_catalog(
-    database="stedi_db", 
-    table_name="accelerometer_landing", 
+accelerometer_landing = glueContext.create_dynamic_frame.from_options(
+    connection_type="s3",
+    connection_options={"paths": ["s3://cd0030bucket/accelerometer/"]},
+    format="json",
     transformation_ctx="accelerometer_landing_source"
 )
 

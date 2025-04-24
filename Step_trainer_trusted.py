@@ -46,9 +46,10 @@ DATA_QUALITY_RULES = """
 """
 
 # Load step trainer readings from landing zone
-step_trainer_landing = glueContext.create_dynamic_frame.from_catalog(
-    database="stedi_db", 
-    table_name="step_trainer_landing", 
+step_trainer_landing = glueContext.create_dynamic_frame.from_options(
+    connection_type="s3",
+    connection_options={"paths": ["s3://cd0030bucket/step_trainer/"]},
+    format="json",
     transformation_ctx="step_trainer_landing_source"
 )
 
