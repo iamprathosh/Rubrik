@@ -30,9 +30,10 @@ DATA_QUALITY_RULES = """
 """
 
 # Extract customer data from landing zone
-customer_landing = glueContext.create_dynamic_frame.from_catalog(
-    database="stedi_db", 
-    table_name="customer_landing", 
+customer_landing = glueContext.create_dynamic_frame.from_options(
+    connection_type="s3",
+    connection_options={"paths": ["s3://cd0030bucket/customers/"]},
+    format="json",
     transformation_ctx="customer_landing_extraction"
 )
 
